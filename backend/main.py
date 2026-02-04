@@ -387,10 +387,14 @@ from urllib.parse import quote
 import io
 import re
 
-# Mount the entire host FS (read-only effectively via web) to serve covers
-# We mount /host_mnt to /files
-if os.path.exists("/host_mnt"):
-    app.mount("/files", StaticFiles(directory="/host_mnt"), name="files")
+# Mount the library path directly to allow web access to covers
+# If config["library_path"] is "/audiobooks", we mount it to "/files"
+lib_path = config.get("library_path", "/audiobooks")
+if os.path.exists(lib_path):
+    app.mount("/files", StaticFiles(directory=lib_path), name="files")
+    logger.info(f"Serving static files from {lib_path} at /files")
+else:
+    logger.warning(f"Static file path not found: {lib_path}")
 
 # -----------------
 # 4. AUDIOBOOKSHELF CUSTOM PROVIDER API
@@ -664,18 +668,20 @@ def check_book_on_disk(book):
         
         web_path = None
         if cover_file:
-            # Construct path relative to /host_mnt
-            # found_dir is e.g. /host_mnt/DATA/Media/books/Author/Title
-            # We need to strip /host_mnt to get /DATA/Media/books/Author/Title/cover.jpg
+            # Construct path relative to the library root
+            # found_dir is e.g. /audiobooks/Author/Title
+            # We need to strip /audiobooks to get /Author/Title/cover.jpg
             # Then prepend /files
             
-            # Using simple string replace if starts with /host_mnt
             full_path = os.path.join(found_dir, cover_file)
-            if full_path.startswith("/host_mnt"):
-                rel_host = full_path.replace("/host_mnt", "", 1)
-                # Ensure it starts with / for URL construction
-                if not rel_host.startswith("/"): rel_host = "/" + rel_host
-                web_path = f"/files{rel_host}"
+            lib_root = config.get("library_path", "/audiobooks")
+            
+            if full_path.startswith(lib_root):
+                rel_path = full_path.replace(lib_root, "", 1)
+                # Ensure correct slashes for URL
+                rel_path = rel_path.replace("\\", "/")
+                if not rel_path.startswith("/"): rel_path = "/" + rel_path
+                web_path = f"/files{rel_path}"
         
         return True, web_path
             
