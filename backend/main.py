@@ -245,6 +245,15 @@ def start_renamer():
          logger.error(f"Path not found: {internal_path} (Check if path exists on Server)")
          return {"status": "Error: Path not found"}
 
+    # DEBUG: List contents to verify mount
+    try:
+        logging.info(f"DEBUG: Checking content of {internal_path}...")
+        contents = os.listdir(internal_path)
+        logging.info(f"DEBUG: Found {len(contents)} items: {contents[:10]}...")
+    except Exception as e:
+        logging.error(f"DEBUG: Error reading directory: {e}")
+
+
     def worker():
         global is_running
         logger.info("Renamer Core: Starting processing cycle...")
