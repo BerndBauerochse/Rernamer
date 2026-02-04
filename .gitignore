@@ -1,0 +1,23 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.env
+.venv
+
+# Project specific
+backend/config.json
+backend/audiobooks.db
+client_env/
+frontend/node_modules/
+frontend/dist/
+frontend_dist/
+*.zip
+*.log
+.DS_Store
+data/
+library_test/
+root@

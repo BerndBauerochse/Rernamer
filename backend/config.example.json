@@ -1,0 +1,4 @@
+{
+    "library_path": "/data/audiobooks",
+    "n8n_webhook_url": "https://your-n8n-instance.com/webhook/..."
+}

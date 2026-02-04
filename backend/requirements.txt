@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+sqlalchemy
+requests
+pydantic
+websockets
+aiofiles
+python-multipart
+# Removed heavy libs: pandas, lxml, openpyxl, xlsxwriter, xlrd, html5lib, beautifulsoup4
+

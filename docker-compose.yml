@@ -1,0 +1,15 @@
+version: "3.8"
+services:
+  renamer:
+    build: .
+    image: audiobook-renamer-v2
+    container_name: audiobook-renamer
+    ports:
+      - "8091:8000"
+    volumes:
+      - /:/host_mnt
+      - ./data:/app/data
+    environment:
+      - PUID=0
+      - PGID=0
+    restart: unless-stopped
