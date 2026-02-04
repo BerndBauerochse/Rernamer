@@ -7,8 +7,13 @@ DB_PATH = os.getenv("DB_PATH", "/app/data/metadata.db")
 SQLALCHEMY_DATABASE_URL = f"sqlite:///{DB_PATH}"
 
 # Ensure dir exists if local testing
-if os.name == 'nt' and not os.path.exists(os.path.dirname(DB_PATH)) and "/app/" not in DB_PATH:
-     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+# Ensure dir exists (Critical for Docker/Linux)
+db_dir = os.path.dirname(DB_PATH)
+if db_dir and not os.path.exists(db_dir):
+    try:
+        os.makedirs(db_dir, exist_ok=True)
+    except Exception:
+        pass # Ignore permission errors if we can't write, will crash later anyway but let engine try
 
 engine = create_engine(
     SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread": False}
