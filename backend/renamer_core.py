@@ -40,6 +40,9 @@ class RenamerLogger:
             "level": level,
             "message": message
         }
+        # Force immediate print to Docker console
+        print(f"{level}: {message}", flush=True)
+        
         self.history.append(entry)
         # Keep history limited
         if len(self.history) > 1000:
