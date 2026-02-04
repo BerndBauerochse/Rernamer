@@ -150,21 +150,35 @@ app.add_middleware(
 # Config
 # Config
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
-# Default path (Generic for Docker/Linux)
-default_config = {
+
+# 1. Defaults
+final_config = {
     "library_path": "/data/audiobooks",
     "n8n_webhook_url": ""
 }
 
+# 2. Override with Config File (Prioritized for local use)
 if os.path.exists(CONFIG_FILE):
-    with open(CONFIG_FILE, 'r') as f:
-        try:
-            config = json.load(f)
-        except json.JSONDecodeError:
-            config = default_config
-            logger.error("Config file corrupted, using defaults.")
-else:
-    config = default_config
+    try:
+        with open(CONFIG_FILE, 'r') as f:
+            file_config = json.load(f)
+            final_config.update(file_config)
+            logger.info("Loaded config from file.")
+    except json.JSONDecodeError:
+        logger.error("Config file corrupted. Using defaults/env.")
+
+# 3. Override with Environment Variables (Prioritized for Docker/Coolify)
+# This allows usage without config.json
+env_lib = os.getenv("LIBRARY_PATH")
+if env_lib: 
+    final_config["library_path"] = env_lib
+
+env_webhook = os.getenv("N8N_WEBHOOK_URL")
+if env_webhook: 
+    final_config["n8n_webhook_url"] = env_webhook
+
+# Apply
+config = final_config
 
 # State
 is_running = False
