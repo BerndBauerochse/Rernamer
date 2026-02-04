@@ -247,11 +247,19 @@ def start_renamer():
 
     # DEBUG: List contents to verify mount
     try:
-        logging.info(f"DEBUG: Checking content of {internal_path}...")
+        msg = f"DEBUG: Checking content of {internal_path}..."
+        logger.info(msg)
+        print(msg, flush=True) # Double safety
+        
         contents = os.listdir(internal_path)
-        logging.info(f"DEBUG: Found {len(contents)} items: {contents[:10]}...")
+        
+        msg2 = f"DEBUG: Found {len(contents)} items: {contents[:10]}..."
+        logger.info(msg2)
+        print(msg2, flush=True)
     except Exception as e:
-        logging.error(f"DEBUG: Error reading directory: {e}")
+        err_msg = f"DEBUG: Error reading directory: {e}"
+        logger.error(err_msg)
+        print(err_msg, flush=True)
 
 
     def worker():
