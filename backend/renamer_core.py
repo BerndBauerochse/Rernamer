@@ -187,7 +187,7 @@ def cleanup_takedowns(db: Session, library_path: str):
 
     for root, dirs, files in os.walk(library_path):
         if stop_event.is_set(): return
-        if "_DUPLICATES_TO_DELETE" in root: continue
+        if "_DUPLICATES_TO_DELETE" in root or "_STAGING" in root: continue
             
         found_takedown_ean = None
         for file in files:
@@ -218,7 +218,7 @@ def cleanup_metadata_files(library_path):
         if stop_event.is_set(): return
         
         # Skip special folders
-        if "_DUPLICATES_TO_DELETE" in root: continue
+        if "_DUPLICATES_TO_DELETE" in root or "_STAGING" in root: continue
 
         if "metadata.json" in files:
             full_path = os.path.join(root, "metadata.json")
@@ -243,9 +243,17 @@ def run_once(library_path):
         # Phase 0: Security & Pre-Cleanup
         cleanup_takedowns(db, library_path)
 
-        # Phase 1: Unzip Phase
-        # We iterate specifically to find and extract all Zips first.
-        # This ensures they are ready as folders for Phase 2.
+        # Phase 1: Unzip Phase (staging)
+        # Extract into _STAGING to avoid creating ISBN-named folders in the root.
+        staging_dir = os.path.join(library_path, "_STAGING")
+        os.makedirs(staging_dir, exist_ok=True)
+        
+        def make_work_dir(ean: str):
+            base = f"_INPROGRESS_{ean}"
+            work_dir = os.path.join(staging_dir, base)
+            if not os.path.exists(work_dir):
+                return work_dir
+            return os.path.join(staging_dir, f"{base}_{int(time.time())}")
         
         # Scan current items
         current_items = os.listdir(library_path)
@@ -258,8 +266,8 @@ def run_once(library_path):
                 item_path = os.path.join(library_path, item)
                 try:
                     logger.info(f"Unzipping {item}...")
-                    folder_name = os.path.splitext(item)[0]
-                    target_path = os.path.join(library_path, folder_name)
+                    ean = os.path.splitext(item)[0]
+                    target_path = make_work_dir(ean)
                     os.makedirs(target_path, exist_ok=True)
                     
                     with zipfile.ZipFile(item_path, 'r') as zip_ref:
@@ -281,17 +289,39 @@ def run_once(library_path):
         if stop_event.is_set(): return
 
         # Phase 2: Processing & Renaming Phase
-        # Now we look for EAN folders (including those just extracted)
+        # Move any root EAN folders into staging to avoid ABS seeing them mid-process.
         current_items = os.listdir(library_path) # Refresh list!
-        ean_folders = [i for i in current_items if os.path.isdir(os.path.join(library_path, i)) and re.match(r'^\d{13}$', i)]
+        root_ean_folders = [i for i in current_items if os.path.isdir(os.path.join(library_path, i)) and re.match(r'^\d{13}$', i)]
+        for item in root_ean_folders:
+            if stop_event.is_set(): break
+            item_path = os.path.join(library_path, item)
+            try:
+                work_dir = make_work_dir(item)
+                shutil.move(item_path, work_dir)
+            except Exception as e:
+                logger.error(f"Failed to stage EAN folder {item}: {e}")
         
-        if ean_folders:
-            logger.info(f"Phase 2: Processing {len(ean_folders)} book folder(s)...")
+        # Now process staged folders first; fall back to any remaining root EAN folders.
+        staged_items = []
+        staging_items = os.listdir(staging_dir)
+        for name in staging_items:
+            full_path = os.path.join(staging_dir, name)
+            if not os.path.isdir(full_path):
+                continue
+            match = re.match(r'^_INPROGRESS_(\d{13})(?:_.*)?$', name)
+            if match:
+                staged_items.append((match.group(1), full_path))
+        
+        current_items = os.listdir(library_path)
+        remaining_root = [i for i in current_items if os.path.isdir(os.path.join(library_path, i)) and re.match(r'^\d{13}$', i)]
+        for item in remaining_root:
+            staged_items.append((item, os.path.join(library_path, item)))
+        
+        if staged_items:
+            logger.info(f"Phase 2: Processing {len(staged_items)} book folder(s)...")
             
-            for item in ean_folders:
+            for ean, item_path in staged_items:
                 if stop_event.is_set(): break
-                item_path = os.path.join(library_path, item)
-                ean = item
                 
                 book = db.query(Book).filter(Book.ean == ean).first()
                 if book:
