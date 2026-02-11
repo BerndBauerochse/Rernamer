@@ -5,6 +5,7 @@ import shutil
 import subprocess
 import zipfile
 import time
+import tempfile
 import threading
 import concurrent.futures
 from sqlalchemy.orm import Session
@@ -42,12 +43,12 @@ class RenamerLogger:
         }
         # Force immediate print to Docker console
         print(f"{level}: {message}", flush=True)
-        
+
         self.history.append(entry)
         # Keep history limited
         if len(self.history) > 1000:
             self.history.pop(0)
-            
+
         for listener in self.listeners:
             try:
                 listener(entry)
@@ -68,8 +69,8 @@ def sanitize_filename(name):
 def get_audio_bitrate(file_path):
     try:
         cmd = [
-            "ffprobe", "-v", "error", "-select_streams", "a:0", 
-            "-show_entries", "stream=bit_rate", 
+            "ffprobe", "-v", "error", "-select_streams", "a:0",
+            "-show_entries", "stream=bit_rate",
             "-of", "default=noprint_wrappers=1:nokey=1", file_path
         ]
         result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -86,8 +87,8 @@ def get_audio_bitrate(file_path):
 def get_image_width(file_path):
     try:
         cmd = [
-            "ffprobe", "-v", "error", "-select_streams", "v:0", 
-            "-show_entries", "stream=width", 
+            "ffprobe", "-v", "error", "-select_streams", "v:0",
+            "-show_entries", "stream=width",
             "-of", "default=noprint_wrappers=1:nokey=1", file_path
         ]
         result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -102,66 +103,71 @@ def get_image_width(file_path):
         return 0
 
 def resize_image_if_needed(file_info):
-    if stop_event.is_set(): return
+    if stop_event.is_set():
+        return
     full_path, root, file = file_info
-    MAX_WIDTH = 600
-    
+    max_width = 600
+
     try:
         width = get_image_width(full_path)
-        if width == 0 or width <= MAX_WIDTH:
+        if width == 0 or width <= max_width:
             return
 
-        logger.info(f"Resizing image {file} ({width}px -> {MAX_WIDTH}px)...")
+        logger.info(f"Resizing image {file} ({width}px -> {max_width}px)...")
         temp_path = os.path.join(root, f"temp_{file}")
-        
+
         cmd = [
-            "ffmpeg", "-i", full_path, "-vf", f"scale={MAX_WIDTH}:-1", 
+            "ffmpeg", "-i", full_path, "-vf", f"scale={max_width}:-1",
             "-q:v", "6", "-y", temp_path
         ]
         result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        
+
         if result.returncode == 0:
             os.replace(temp_path, full_path)
             logger.info(f"Resized {file} successfully.")
         else:
             logger.error(f"FFmpeg error resizing {file}: {result.stderr}")
-            if os.path.exists(temp_path): os.remove(temp_path)
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
     except Exception as e:
         logger.error(f"Error resizing {file}: {e}")
 
 def convert_single_file(file_info):
-    if stop_event.is_set(): return
+    if stop_event.is_set():
+        return
     full_path, root, file = file_info
     temp_path = os.path.join(root, f"temp_{file}")
-    
+
     try:
         bitrate = get_audio_bitrate(full_path)
         if 92000 <= bitrate <= 100000:
-            return # Already ~96k
+            return  # Already ~96k
 
         logger.info(f"Converting {file} to 96k (Current: {bitrate})...")
         cmd = [
-            "ffmpeg", "-i", full_path, "-codec:a", "libmp3lame", 
+            "ffmpeg", "-i", full_path, "-codec:a", "libmp3lame",
             "-b:a", "96k", "-y", temp_path
         ]
         result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        
+
         if result.returncode == 0:
             os.replace(temp_path, full_path)
             logger.info(f"Converted {file} successfully.")
         else:
             logger.error(f"FFmpeg error on {file}: {result.stderr}")
-            if os.path.exists(temp_path): os.remove(temp_path)
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
 
     except Exception as e:
         logger.error(f"Error converting {file}: {e}")
-        if os.path.exists(temp_path): os.remove(temp_path)
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
 
 def convert_folder_to_96k(folder_path):
     logger.info(f"Optimizing folder: {folder_path}...")
     mp3_files = []
     image_files = []
-    
+
     for root, dirs, files in os.walk(folder_path):
         for file in files:
             lower = file.lower()
@@ -169,26 +175,31 @@ def convert_folder_to_96k(folder_path):
                 mp3_files.append((os.path.join(root, file), root, file))
             elif lower.endswith((".jpg", ".jpeg", ".png")):
                 image_files.append((os.path.join(root, file), root, file))
-    
-    workers = 1 
+
+    workers = 1
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
-        if mp3_files: executor.map(convert_single_file, mp3_files)
-        if image_files: executor.map(resize_image_if_needed, image_files)
+        if mp3_files:
+            executor.map(convert_single_file, mp3_files)
+        if image_files:
+            executor.map(resize_image_if_needed, image_files)
 
 def cleanup_takedowns(db: Session, library_path: str):
     logger.info("Scanning for TAKEDOWN content...")
     forbidden_books = db.query(Book).filter(Book.takedown == True).all()
     forbidden_eans = set([b.ean for b in forbidden_books])
-    
-    if not forbidden_eans: return
+
+    if not forbidden_eans:
+        return
 
     trash_dir = os.path.join(library_path, "_DUPLICATES_TO_DELETE")
     os.makedirs(trash_dir, exist_ok=True)
 
     for root, dirs, files in os.walk(library_path):
-        if stop_event.is_set(): return
-        if "_DUPLICATES_TO_DELETE" in root or "_STAGING" in root: continue
-            
+        if stop_event.is_set():
+            return
+        if "_DUPLICATES_TO_DELETE" in root:
+            continue
+
         found_takedown_ean = None
         for file in files:
             if file.lower().endswith((".jpg", ".jpeg")):
@@ -196,42 +207,113 @@ def cleanup_takedowns(db: Session, library_path: str):
                 if name_no_ext in forbidden_eans:
                     found_takedown_ean = name_no_ext
                     break
-        
+
         if found_takedown_ean:
             logger.warning(f"Removing takedown content: {found_takedown_ean} in {root}")
             target_path = os.path.join(trash_dir, os.path.basename(root))
-            if os.path.exists(target_path): target_path += f"_{int(time.time())}"
+            if os.path.exists(target_path):
+                target_path += f"_{int(time.time())}"
             try:
                 shutil.move(root, target_path)
             except Exception as e:
                 logger.error(f"Failed to move takedown folder: {e}")
 
 def cleanup_metadata_files(library_path):
-    """Deletes metadata.json files older than 72 hours (3 days)."""
-    limit = 72 * 3600  # 3 days in seconds
-    now = time.time()
+    """Deletes all metadata.json files immediately."""
     count = 0
-    
-    # We only want to clean inside the library structure, not the root indiscriminately
-    # But os.walk is safe enough if we check filename
+
     for root, dirs, files in os.walk(library_path):
-        if stop_event.is_set(): return
-        
-        # Skip special folders
-        if "_DUPLICATES_TO_DELETE" in root or "_STAGING" in root: continue
+        if stop_event.is_set():
+            return
+        if "_DUPLICATES_TO_DELETE" in root:
+            continue
 
         if "metadata.json" in files:
             full_path = os.path.join(root, "metadata.json")
             try:
-                mtime = os.path.getmtime(full_path)
-                if now - mtime > limit:
-                    os.remove(full_path)
-                    count += 1
+                os.remove(full_path)
+                count += 1
             except Exception as e:
-                logger.debug(f"Error checking metadata file {full_path}: {e}")
-    
+                logger.debug(f"Error deleting metadata file {full_path}: {e}")
+
     if count > 0:
-        logger.info(f"Maintenance: Removed {count} old metadata.json files.")
+        logger.info(f"Maintenance: Removed {count} metadata.json file(s).")
+
+def flatten_single_subfolder(folder_path):
+    """If folder contains exactly one subfolder, move its contents one level up."""
+    items = os.listdir(folder_path)
+    if len(items) != 1:
+        return
+    sub_path = os.path.join(folder_path, items[0])
+    if not os.path.isdir(sub_path):
+        return
+
+    for name in os.listdir(sub_path):
+        shutil.move(os.path.join(sub_path, name), folder_path)
+    os.rmdir(sub_path)
+
+def build_final_title(book, safe_title):
+    final_title = safe_title
+    if not book.abridged_status:
+        return final_title
+
+    status_lower = book.abridged_status.lower().strip()
+    if "hÃ¶rspiel" in status_lower or "hoerspiel" in status_lower or "hsp" in status_lower:
+        return f"{safe_title}_Hsp"
+    if "ungekÃ¼rzt" in status_lower or "ungekuerzt" in status_lower or "unabridged" in status_lower:
+        return f"{safe_title} (ungekuerzt)"
+    if "gekÃ¼rzt" in status_lower or "gekuerzt" in status_lower or "abridged" in status_lower:
+        return f"{safe_title} (gekuerzt)"
+
+    safe_abridged = sanitize_filename(book.abridged_status)
+    return f"{safe_title} ({safe_abridged})"
+
+def process_ean_folder(db: Session, library_path: str, ean: str, source_path: str):
+    if stop_event.is_set():
+        return
+
+    book = db.query(Book).filter(Book.ean == ean).first()
+    if not book:
+        logger.debug(f"Ignored Unknown EAN folder: {ean}")
+        return
+
+    if book.takedown:
+        logger.warning(f"TAKEDOWN {ean}. Deleting.")
+        trash_dir = os.path.join(library_path, "_DUPLICATES_TO_DELETE")
+        os.makedirs(trash_dir, exist_ok=True)
+        target = os.path.join(trash_dir, ean)
+        if os.path.exists(target):
+            target = f"{target}_{int(time.time())}"
+        shutil.move(source_path, target)
+        return
+
+    safe_author = sanitize_filename(book.author or "Unknown")
+    safe_title = sanitize_filename(book.title or "Unknown")
+    final_title = build_final_title(book, safe_title)
+
+    author_dir = os.path.join(library_path, safe_author)
+    final_path = os.path.join(author_dir, final_title)
+    os.makedirs(author_dir, exist_ok=True)
+
+    # Move into final structure first, then optimize in place.
+    if os.path.abspath(source_path) != os.path.abspath(final_path):
+        destination = final_path
+        if os.path.exists(destination):
+            destination = f"{final_path}_{int(time.time())}"
+            logger.warning(f"Target '{final_title}' exists. Using '{os.path.basename(destination)}'.")
+        shutil.move(source_path, destination)
+        final_path = destination
+
+    convert_folder_to_96k(final_path)
+
+    metadata_path = os.path.join(final_path, "metadata.json")
+    if os.path.exists(metadata_path):
+        try:
+            os.remove(metadata_path)
+        except Exception as meta_err:
+            logger.warning(f"Could not delete metadata.json: {meta_err}")
+
+    logger.info(f"Finished: {os.path.basename(final_path)}")
 
 def run_once(library_path):
     if not os.path.exists(library_path):
@@ -243,157 +325,60 @@ def run_once(library_path):
         # Phase 0: Security & Pre-Cleanup
         cleanup_takedowns(db, library_path)
 
-        # Phase 1: Unzip Phase (staging)
-        # Extract into _STAGING to avoid creating ISBN-named folders in the root.
-        staging_dir = os.path.join(library_path, "_STAGING")
-        os.makedirs(staging_dir, exist_ok=True)
-        
-        def make_work_dir(ean: str):
-            base = f"_INPROGRESS_{ean}"
-            work_dir = os.path.join(staging_dir, base)
-            if not os.path.exists(work_dir):
-                return work_dir
-            return os.path.join(staging_dir, f"{base}_{int(time.time())}")
-        
-        # Scan current items
+        # Phase 1: Unzip outside library, then move directly into final structure.
         current_items = os.listdir(library_path)
-        zip_files = [i for i in current_items if os.path.isfile(os.path.join(library_path, i)) and i.lower().endswith('.zip')]
-        
+        zip_files = [
+            i for i in current_items
+            if os.path.isfile(os.path.join(library_path, i)) and i.lower().endswith('.zip')
+        ]
+
         if zip_files:
             logger.info(f"Phase 1: Found {len(zip_files)} zip(s) to extract.")
             for item in zip_files:
-                if stop_event.is_set(): break
+                if stop_event.is_set():
+                    break
                 item_path = os.path.join(library_path, item)
+                temp_dir = None
                 try:
                     logger.info(f"Unzipping {item}...")
                     ean = os.path.splitext(item)[0]
-                    target_path = make_work_dir(ean)
-                    os.makedirs(target_path, exist_ok=True)
-                    
+                    temp_dir = tempfile.mkdtemp(prefix=f"renamer_{ean}_")
+
                     with zipfile.ZipFile(item_path, 'r') as zip_ref:
-                        zip_ref.extractall(target_path)
-                    
-                    # Flatten single sub-folder if present
-                    items = os.listdir(target_path)
-                    if len(items) == 1 and os.path.isdir(os.path.join(target_path, items[0])):
-                        sub = os.path.join(target_path, items[0])
-                        for s in os.listdir(sub):
-                            shutil.move(os.path.join(sub, s), target_path)
-                        os.rmdir(sub)
-                        
+                        zip_ref.extractall(temp_dir)
+
+                    flatten_single_subfolder(temp_dir)
+                    process_ean_folder(db, library_path, ean, temp_dir)
                     os.remove(item_path)
                 except Exception as e:
                     logger.error(f"Zip extraction error for {item}: {e}")
-                    continue
+                finally:
+                    if temp_dir and os.path.exists(temp_dir):
+                        shutil.rmtree(temp_dir, ignore_errors=True)
 
-        if stop_event.is_set(): return
+        if stop_event.is_set():
+            return
 
-        # Phase 2: Processing & Renaming Phase
-        # Move any root EAN folders into staging to avoid ABS seeing them mid-process.
-        current_items = os.listdir(library_path) # Refresh list!
-        root_ean_folders = [i for i in current_items if os.path.isdir(os.path.join(library_path, i)) and re.match(r'^\d{13}$', i)]
-        for item in root_ean_folders:
-            if stop_event.is_set(): break
-            item_path = os.path.join(library_path, item)
-            try:
-                work_dir = make_work_dir(item)
-                shutil.move(item_path, work_dir)
-            except Exception as e:
-                logger.error(f"Failed to stage EAN folder {item}: {e}")
-        
-        # Now process staged folders first; fall back to any remaining root EAN folders.
-        staged_items = []
-        staging_items = os.listdir(staging_dir)
-        for name in staging_items:
-            full_path = os.path.join(staging_dir, name)
-            if not os.path.isdir(full_path):
-                continue
-            match = re.match(r'^_INPROGRESS_(\d{13})(?:_.*)?$', name)
-            if match:
-                staged_items.append((match.group(1), full_path))
-        
+        # Phase 2: Process existing EAN folders in root.
         current_items = os.listdir(library_path)
-        remaining_root = [i for i in current_items if os.path.isdir(os.path.join(library_path, i)) and re.match(r'^\d{13}$', i)]
-        for item in remaining_root:
-            staged_items.append((item, os.path.join(library_path, item)))
-        
-        if staged_items:
-            logger.info(f"Phase 2: Processing {len(staged_items)} book folder(s)...")
-            
-            for ean, item_path in staged_items:
-                if stop_event.is_set(): break
-                
-                book = db.query(Book).filter(Book.ean == ean).first()
-                if book:
-                    if book.takedown:
-                        logger.warning(f"TAKEDOWN {ean}. Deleting.")
-                        shutil.move(item_path, os.path.join(library_path, "_DUPLICATES_TO_DELETE", ean))
-                        continue
+        ean_folders = [
+            i for i in current_items
+            if os.path.isdir(os.path.join(library_path, i)) and re.match(r'^\d{13}$', i)
+        ]
 
-                    safe_author = sanitize_filename(book.author or "Unknown")
-                    safe_title = sanitize_filename(book.title or "Unknown")
-                    
-                    # Naming Logic
-                    final_title = safe_title
-                    if book.abridged_status:
-                        status_lower = book.abridged_status.lower().strip()
-                        if "hörspiel" in status_lower or "hoerspiel" in status_lower or "hsp" in status_lower:
-                            final_title = f"{safe_title}_Hsp"
-                        elif "ungekürzt" in status_lower or "ungekuerzt" in status_lower or "unabridged" in status_lower:
-                            final_title = f"{safe_title} (ungekuerzt)"
-                        elif "gekürzt" in status_lower or "gekuerzt" in status_lower or "abridged" in status_lower:
-                            final_title = f"{safe_title} (gekuerzt)"
-                        else:
-                            safe_abridged = sanitize_filename(book.abridged_status)
-                            final_title = f"{safe_title} ({safe_abridged})"
-                    
-                    # Define destinations
-                    author_dir = os.path.join(library_path, safe_author)
-                    new_book_path = os.path.join(author_dir, final_title)
-                    
-                    if os.path.exists(new_book_path):
-                        logger.warning(f"Target '{final_title}' already exists. Skipping move.")
-                    else:
-                        # 1. Optimize
-                        convert_folder_to_96k(item_path)
-                        
-                        # 2. Move
-                        os.makedirs(author_dir, exist_ok=True)
-                        shutil.move(item_path, new_book_path)
-                        
-                        # 3. Metadata
-                        import json
-                        metadata_path = os.path.join(new_book_path, "metadata.json")
-                        metadata = {"isbn": ean}
-                        
-                        if book.narrator:
-                            narrators = []
-                            for part in book.narrator.split(';'):
-                                part = part.strip()
-                                if ',' in part:
-                                    last, first = part.split(',', 1)
-                                    narrators.append(f"{first.strip()} {last.strip()}")
-                                else:
-                                    narrators.append(part)
-                            metadata["narrators"] = narrators
-                        
-                        try:
-                            with open(metadata_path, 'w', encoding='utf-8') as mf:
-                                json.dump(metadata, mf, ensure_ascii=False, indent=2)
-                        except Exception as meta_err:
-                            logger.warning(f"Could not write metadata.json: {meta_err}")
-                        
-                        logger.info(f"Finished: {final_title}")
-                else:
-                    logger.debug(f"Ignored Unknown EAN folder: {ean}")
+        if ean_folders:
+            logger.info(f"Phase 2: Processing {len(ean_folders)} book folder(s)...")
+            for item in ean_folders:
+                if stop_event.is_set():
+                    break
+                process_ean_folder(db, library_path, item, os.path.join(library_path, item))
 
         # Phase 3: Maintenance
         if not stop_event.is_set():
-             cleanup_metadata_files(library_path)
+            cleanup_metadata_files(library_path)
 
     except Exception as e:
         logger.error(f"Critical Scan Error: {e}")
     finally:
         db.close()
     logger.info("Scan Cycle Complete.")
-
