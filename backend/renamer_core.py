@@ -270,12 +270,12 @@ def build_final_title(book, safe_title):
 
 def process_ean_folder(db: Session, library_path: str, ean: str, source_path: str):
     if stop_event.is_set():
-        return
+        return False
 
     book = db.query(Book).filter(Book.ean == ean).first()
     if not book:
         logger.debug(f"Ignored Unknown EAN folder: {ean}")
-        return
+        return False
 
     if book.takedown:
         logger.warning(f"TAKEDOWN {ean}. Deleting.")
@@ -285,7 +285,7 @@ def process_ean_folder(db: Session, library_path: str, ean: str, source_path: st
         if os.path.exists(target):
             target = f"{target}_{int(time.time())}"
         shutil.move(source_path, target)
-        return
+        return True
 
     safe_author = sanitize_filename(book.author or "Unknown")
     safe_title = sanitize_filename(book.title or "Unknown")
@@ -314,6 +314,7 @@ def process_ean_folder(db: Session, library_path: str, ean: str, source_path: st
             logger.warning(f"Could not delete metadata.json: {meta_err}")
 
     logger.info(f"Finished: {os.path.basename(final_path)}")
+    return True
 
 def run_once(library_path):
     if not os.path.exists(library_path):
@@ -348,8 +349,11 @@ def run_once(library_path):
                         zip_ref.extractall(temp_dir)
 
                     flatten_single_subfolder(temp_dir)
-                    process_ean_folder(db, library_path, ean, temp_dir)
-                    os.remove(item_path)
+                    processed = process_ean_folder(db, library_path, ean, temp_dir)
+                    if processed:
+                        os.remove(item_path)
+                    else:
+                        logger.warning(f"No DB match for {ean}. Keeping zip '{item}'.")
                 except Exception as e:
                     logger.error(f"Zip extraction error for {item}: {e}")
                 finally:
