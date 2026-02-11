@@ -7,6 +7,7 @@ import zipfile
 import time
 import tempfile
 import threading
+import json
 import concurrent.futures
 from sqlalchemy.orm import Session
 from database import SessionLocal
@@ -39,7 +40,7 @@ class RenamerLogger:
         entry = {
             "timestamp": time.time(),
             "level": level,
-            "message": message
+            "message": message,
         }
         # Force immediate print to Docker console
         print(f"{level}: {message}", flush=True)
@@ -52,26 +53,36 @@ class RenamerLogger:
         for listener in self.listeners:
             try:
                 listener(entry)
-            except:
+            except Exception:
                 pass
+
 
 logger = RenamerLogger()
 
 # Global State
 stop_event = threading.Event()
 
+
 def sanitize_filename(name):
     if not name:
         return ""
-    safe = re.sub(r'[<>:"/\\|?*]', '', str(name)).strip()
+    safe = re.sub(r'[<>:"/\\|?*]', "", str(name)).strip()
     return safe
+
 
 def get_audio_bitrate(file_path):
     try:
         cmd = [
-            "ffprobe", "-v", "error", "-select_streams", "a:0",
-            "-show_entries", "stream=bit_rate",
-            "-of", "default=noprint_wrappers=1:nokey=1", file_path
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "a:0",
+            "-show_entries",
+            "stream=bit_rate",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            file_path,
         ]
         result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         if result.returncode != 0:
@@ -84,12 +95,20 @@ def get_audio_bitrate(file_path):
         logger.error(f"Error checking bitrate for {file_path}: {e}")
         return 0
 
+
 def get_image_width(file_path):
     try:
         cmd = [
-            "ffprobe", "-v", "error", "-select_streams", "v:0",
-            "-show_entries", "stream=width",
-            "-of", "default=noprint_wrappers=1:nokey=1", file_path
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=width",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            file_path,
         ]
         result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         if result.returncode != 0:
@@ -102,10 +121,11 @@ def get_image_width(file_path):
         logger.error(f"Error checking image width for {file_path}: {e}")
         return 0
 
+
 def resize_image_if_needed(file_info):
     if stop_event.is_set():
         return
-    full_path, root, file = file_info
+    full_path, root, file_name = file_info
     max_width = 600
 
     try:
@@ -113,55 +133,71 @@ def resize_image_if_needed(file_info):
         if width == 0 or width <= max_width:
             return
 
-        logger.info(f"Resizing image {file} ({width}px -> {max_width}px)...")
-        temp_path = os.path.join(root, f"temp_{file}")
+        logger.info(f"Resizing image {file_name} ({width}px -> {max_width}px)...")
+        temp_path = os.path.join(root, f"temp_{file_name}")
 
         cmd = [
-            "ffmpeg", "-i", full_path, "-vf", f"scale={max_width}:-1",
-            "-q:v", "6", "-y", temp_path
+            "ffmpeg",
+            "-i",
+            full_path,
+            "-vf",
+            f"scale={max_width}:-1",
+            "-q:v",
+            "6",
+            "-y",
+            temp_path,
         ]
         result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
         if result.returncode == 0:
             os.replace(temp_path, full_path)
-            logger.info(f"Resized {file} successfully.")
+            logger.info(f"Resized {file_name} successfully.")
         else:
-            logger.error(f"FFmpeg error resizing {file}: {result.stderr}")
+            logger.error(f"FFmpeg error resizing {file_name}: {result.stderr}")
             if os.path.exists(temp_path):
                 os.remove(temp_path)
     except Exception as e:
-        logger.error(f"Error resizing {file}: {e}")
+        logger.error(f"Error resizing {file_name}: {e}")
+
 
 def convert_single_file(file_info):
     if stop_event.is_set():
         return
-    full_path, root, file = file_info
-    temp_path = os.path.join(root, f"temp_{file}")
+    full_path, root, file_name = file_info
+    temp_path = os.path.join(root, f"temp_{file_name}")
 
     try:
         bitrate = get_audio_bitrate(full_path)
         if 92000 <= bitrate <= 100000:
             return  # Already ~96k
 
-        logger.info(f"Converting {file} to 96k (Current: {bitrate})...")
+        logger.info(f"Converting {file_name} to 96k (Current: {bitrate})...")
         cmd = [
-            "ffmpeg", "-i", full_path, "-codec:a", "libmp3lame",
-            "-b:a", "96k", "-y", temp_path
+            "ffmpeg",
+            "-i",
+            full_path,
+            "-codec:a",
+            "libmp3lame",
+            "-b:a",
+            "96k",
+            "-y",
+            temp_path,
         ]
         result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
         if result.returncode == 0:
             os.replace(temp_path, full_path)
-            logger.info(f"Converted {file} successfully.")
+            logger.info(f"Converted {file_name} successfully.")
         else:
-            logger.error(f"FFmpeg error on {file}: {result.stderr}")
+            logger.error(f"FFmpeg error on {file_name}: {result.stderr}")
             if os.path.exists(temp_path):
                 os.remove(temp_path)
 
     except Exception as e:
-        logger.error(f"Error converting {file}: {e}")
+        logger.error(f"Error converting {file_name}: {e}")
         if os.path.exists(temp_path):
             os.remove(temp_path)
+
 
 def convert_folder_to_96k(folder_path):
     logger.info(f"Optimizing folder: {folder_path}...")
@@ -169,12 +205,12 @@ def convert_folder_to_96k(folder_path):
     image_files = []
 
     for root, dirs, files in os.walk(folder_path):
-        for file in files:
-            lower = file.lower()
+        for file_name in files:
+            lower = file_name.lower()
             if lower.endswith(".mp3"):
-                mp3_files.append((os.path.join(root, file), root, file))
+                mp3_files.append((os.path.join(root, file_name), root, file_name))
             elif lower.endswith((".jpg", ".jpeg", ".png")):
-                image_files.append((os.path.join(root, file), root, file))
+                image_files.append((os.path.join(root, file_name), root, file_name))
 
     workers = 1
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
@@ -182,6 +218,7 @@ def convert_folder_to_96k(folder_path):
             executor.map(convert_single_file, mp3_files)
         if image_files:
             executor.map(resize_image_if_needed, image_files)
+
 
 def cleanup_takedowns(db: Session, library_path: str):
     logger.info("Scanning for TAKEDOWN content...")
@@ -201,9 +238,9 @@ def cleanup_takedowns(db: Session, library_path: str):
             continue
 
         found_takedown_ean = None
-        for file in files:
-            if file.lower().endswith((".jpg", ".jpeg")):
-                name_no_ext = os.path.splitext(file)[0]
+        for file_name in files:
+            if file_name.lower().endswith((".jpg", ".jpeg")):
+                name_no_ext = os.path.splitext(file_name)[0]
                 if name_no_ext in forbidden_eans:
                     found_takedown_ean = name_no_ext
                     break
@@ -218,26 +255,11 @@ def cleanup_takedowns(db: Session, library_path: str):
             except Exception as e:
                 logger.error(f"Failed to move takedown folder: {e}")
 
+
 def cleanup_metadata_files(library_path):
-    """Deletes all metadata.json files immediately."""
-    count = 0
+    """No-op maintenance hook. metadata.json is intentionally kept for ABS imports."""
+    return
 
-    for root, dirs, files in os.walk(library_path):
-        if stop_event.is_set():
-            return
-        if "_DUPLICATES_TO_DELETE" in root:
-            continue
-
-        if "metadata.json" in files:
-            full_path = os.path.join(root, "metadata.json")
-            try:
-                os.remove(full_path)
-                count += 1
-            except Exception as e:
-                logger.debug(f"Error deleting metadata file {full_path}: {e}")
-
-    if count > 0:
-        logger.info(f"Maintenance: Removed {count} metadata.json file(s).")
 
 def flatten_single_subfolder(folder_path):
     """If folder contains exactly one subfolder, move its contents one level up."""
@@ -252,21 +274,78 @@ def flatten_single_subfolder(folder_path):
         shutil.move(os.path.join(sub_path, name), folder_path)
     os.rmdir(sub_path)
 
+
 def build_final_title(book, safe_title):
     final_title = safe_title
     if not book.abridged_status:
         return final_title
 
     status_lower = book.abridged_status.lower().strip()
-    if "hÃ¶rspiel" in status_lower or "hoerspiel" in status_lower or "hsp" in status_lower:
+    status_norm = (
+        status_lower.replace("ä", "ae")
+        .replace("ö", "oe")
+        .replace("ü", "ue")
+        .replace("ß", "ss")
+        .replace("Ã¶", "oe")
+        .replace("Ã¼", "ue")
+        .replace("ÃƒÂ¶", "oe")
+        .replace("ÃƒÂ¼", "ue")
+        .replace("ã¶", "oe")
+        .replace("ã¼", "ue")
+    )
+
+    if "hoerspiel" in status_norm or "hsp" in status_norm:
         return f"{safe_title}_Hsp"
-    if "ungekÃ¼rzt" in status_lower or "ungekuerzt" in status_lower or "unabridged" in status_lower:
+    if "ungekuerzt" in status_norm or "unabridged" in status_norm:
         return f"{safe_title} (ungekuerzt)"
-    if "gekÃ¼rzt" in status_lower or "gekuerzt" in status_lower or "abridged" in status_lower:
+    if "gekuerzt" in status_norm or "abridged" in status_norm:
         return f"{safe_title} (gekuerzt)"
 
     safe_abridged = sanitize_filename(book.abridged_status)
     return f"{safe_title} ({safe_abridged})"
+
+
+def merge_folder_contents(src_dir, dst_dir):
+    """Move source contents into destination without creating a second book folder."""
+    for name in os.listdir(src_dir):
+        src_item = os.path.join(src_dir, name)
+        dst_item = os.path.join(dst_dir, name)
+
+        if os.path.isdir(src_item):
+            os.makedirs(dst_item, exist_ok=True)
+            merge_folder_contents(src_item, dst_item)
+            if os.path.exists(src_item):
+                try:
+                    os.rmdir(src_item)
+                except OSError:
+                    pass
+        else:
+            if os.path.exists(dst_item):
+                base, ext = os.path.splitext(name)
+                dst_item = os.path.join(dst_dir, f"{base}_{int(time.time())}{ext}")
+            shutil.move(src_item, dst_item)
+
+
+def write_metadata_file(folder_path, ean, narrator):
+    metadata = {"isbn": ean}
+    if narrator:
+        narrators = []
+        for part in narrator.split(";"):
+            part = part.strip()
+            if not part:
+                continue
+            if "," in part:
+                last, first = part.split(",", 1)
+                narrators.append(f"{first.strip()} {last.strip()}".strip())
+            else:
+                narrators.append(part)
+        if narrators:
+            metadata["narrators"] = narrators
+
+    metadata_path = os.path.join(folder_path, "metadata.json")
+    with open(metadata_path, "w", encoding="utf-8") as mf:
+        json.dump(metadata, mf, ensure_ascii=False, indent=2)
+
 
 def process_ean_folder(db: Session, library_path: str, ean: str, source_path: str):
     if stop_event.is_set():
@@ -297,24 +376,24 @@ def process_ean_folder(db: Session, library_path: str, ean: str, source_path: st
 
     # Move into final structure first, then optimize in place.
     if os.path.abspath(source_path) != os.path.abspath(final_path):
-        destination = final_path
-        if os.path.exists(destination):
-            destination = f"{final_path}_{int(time.time())}"
-            logger.warning(f"Target '{final_title}' exists. Using '{os.path.basename(destination)}'.")
-        shutil.move(source_path, destination)
-        final_path = destination
+        if os.path.exists(final_path):
+            logger.warning(f"Target '{final_title}' exists. Merging into existing folder.")
+            merge_folder_contents(source_path, final_path)
+            if os.path.exists(source_path):
+                shutil.rmtree(source_path, ignore_errors=True)
+        else:
+            shutil.move(source_path, final_path)
 
     convert_folder_to_96k(final_path)
 
-    metadata_path = os.path.join(final_path, "metadata.json")
-    if os.path.exists(metadata_path):
-        try:
-            os.remove(metadata_path)
-        except Exception as meta_err:
-            logger.warning(f"Could not delete metadata.json: {meta_err}")
+    try:
+        write_metadata_file(final_path, ean, book.narrator)
+    except Exception as meta_err:
+        logger.warning(f"Could not write metadata.json: {meta_err}")
 
     logger.info(f"Finished: {os.path.basename(final_path)}")
     return True
+
 
 def run_once(library_path):
     if not os.path.exists(library_path):
@@ -329,8 +408,7 @@ def run_once(library_path):
         # Phase 1: Unzip outside library, then move directly into final structure.
         current_items = os.listdir(library_path)
         zip_files = [
-            i for i in current_items
-            if os.path.isfile(os.path.join(library_path, i)) and i.lower().endswith('.zip')
+            i for i in current_items if os.path.isfile(os.path.join(library_path, i)) and i.lower().endswith(".zip")
         ]
 
         if zip_files:
@@ -345,7 +423,7 @@ def run_once(library_path):
                     ean = os.path.splitext(item)[0]
                     temp_dir = tempfile.mkdtemp(prefix=f"renamer_{ean}_")
 
-                    with zipfile.ZipFile(item_path, 'r') as zip_ref:
+                    with zipfile.ZipFile(item_path, "r") as zip_ref:
                         zip_ref.extractall(temp_dir)
 
                     flatten_single_subfolder(temp_dir)
@@ -366,8 +444,7 @@ def run_once(library_path):
         # Phase 2: Process existing EAN folders in root.
         current_items = os.listdir(library_path)
         ean_folders = [
-            i for i in current_items
-            if os.path.isdir(os.path.join(library_path, i)) and re.match(r'^\d{13}$', i)
+            i for i in current_items if os.path.isdir(os.path.join(library_path, i)) and re.match(r"^\d{13}$", i)
         ]
 
         if ean_folders:
