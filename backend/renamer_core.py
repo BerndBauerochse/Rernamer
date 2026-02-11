@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from database import SessionLocal
 from models import Book
 
+
 # Configurable Logger
 class RenamerLogger:
     def __init__(self):
@@ -46,7 +47,6 @@ class RenamerLogger:
         print(f"{level}: {message}", flush=True)
 
         self.history.append(entry)
-        # Keep history limited
         if len(self.history) > 1000:
             self.history.pop(0)
 
@@ -66,31 +66,21 @@ stop_event = threading.Event()
 def sanitize_filename(name):
     if not name:
         return ""
-    safe = re.sub(r'[<>:"/\\|?*]', "", str(name)).strip()
-    return safe
+    return re.sub(r'[<>:"/\\|?*]', "", str(name)).strip()
 
 
 def get_audio_bitrate(file_path):
     try:
         cmd = [
-            "ffprobe",
-            "-v",
-            "error",
-            "-select_streams",
-            "a:0",
-            "-show_entries",
-            "stream=bit_rate",
-            "-of",
-            "default=noprint_wrappers=1:nokey=1",
-            file_path,
+            "ffprobe", "-v", "error", "-select_streams", "a:0",
+            "-show_entries", "stream=bit_rate",
+            "-of", "default=noprint_wrappers=1:nokey=1", file_path,
         ]
         result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         if result.returncode != 0:
             return 0
         val = result.stdout.strip()
-        if val.isdigit():
-            return int(val)
-        return 0
+        return int(val) if val.isdigit() else 0
     except Exception as e:
         logger.error(f"Error checking bitrate for {file_path}: {e}")
         return 0
@@ -99,24 +89,15 @@ def get_audio_bitrate(file_path):
 def get_image_width(file_path):
     try:
         cmd = [
-            "ffprobe",
-            "-v",
-            "error",
-            "-select_streams",
-            "v:0",
-            "-show_entries",
-            "stream=width",
-            "-of",
-            "default=noprint_wrappers=1:nokey=1",
-            file_path,
+            "ffprobe", "-v", "error", "-select_streams", "v:0",
+            "-show_entries", "stream=width",
+            "-of", "default=noprint_wrappers=1:nokey=1", file_path,
         ]
         result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         if result.returncode != 0:
             return 0
         val = result.stdout.strip()
-        if val.isdigit():
-            return int(val)
-        return 0
+        return int(val) if val.isdigit() else 0
     except Exception as e:
         logger.error(f"Error checking image width for {file_path}: {e}")
         return 0
@@ -137,15 +118,8 @@ def resize_image_if_needed(file_info):
         temp_path = os.path.join(root, f"temp_{file_name}")
 
         cmd = [
-            "ffmpeg",
-            "-i",
-            full_path,
-            "-vf",
-            f"scale={max_width}:-1",
-            "-q:v",
-            "6",
-            "-y",
-            temp_path,
+            "ffmpeg", "-i", full_path, "-vf", f"scale={max_width}:-1",
+            "-q:v", "6", "-y", temp_path,
         ]
         result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
@@ -169,19 +143,12 @@ def convert_single_file(file_info):
     try:
         bitrate = get_audio_bitrate(full_path)
         if 92000 <= bitrate <= 100000:
-            return  # Already ~96k
+            return
 
         logger.info(f"Converting {file_name} to 96k (Current: {bitrate})...")
         cmd = [
-            "ffmpeg",
-            "-i",
-            full_path,
-            "-codec:a",
-            "libmp3lame",
-            "-b:a",
-            "96k",
-            "-y",
-            temp_path,
+            "ffmpeg", "-i", full_path, "-codec:a", "libmp3lame",
+            "-b:a", "96k", "-y", temp_path,
         ]
         result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
@@ -218,6 +185,28 @@ def convert_folder_to_96k(folder_path):
             executor.map(convert_single_file, mp3_files)
         if image_files:
             executor.map(resize_image_if_needed, image_files)
+
+
+def normalize_abridged_status(raw_status):
+    if not raw_status:
+        return ""
+    return (
+        str(raw_status).lower().strip()
+        .replace("\u00e4", "ae")
+        .replace("\u00f6", "oe")
+        .replace("\u00fc", "ue")
+        .replace("\u00df", "ss")
+        .replace("Ã¤", "ae")
+        .replace("Ã¶", "oe")
+        .replace("Ã¼", "ue")
+        .replace("ÃŸ", "ss")
+        .replace("ÃƒÂ¶", "oe")
+        .replace("ÃƒÂ¼", "ue")
+        .replace("ÃƒÆ’Ã‚Â¶", "oe")
+        .replace("ÃƒÆ’Ã‚Â¼", "ue")
+        .replace("Ã£Â¶", "oe")
+        .replace("Ã£Â¼", "ue")
+    )
 
 
 def cleanup_takedowns(db: Session, library_path: str):
@@ -276,33 +265,8 @@ def flatten_single_subfolder(folder_path):
 
 
 def build_final_title(book, safe_title):
-    final_title = safe_title
-    if not book.abridged_status:
-        return final_title
-
-    status_lower = book.abridged_status.lower().strip()
-    status_norm = (
-        status_lower.replace("ä", "ae")
-        .replace("ö", "oe")
-        .replace("ü", "ue")
-        .replace("ß", "ss")
-        .replace("Ã¶", "oe")
-        .replace("Ã¼", "ue")
-        .replace("ÃƒÂ¶", "oe")
-        .replace("ÃƒÂ¼", "ue")
-        .replace("ã¶", "oe")
-        .replace("ã¼", "ue")
-    )
-
-    if "hoerspiel" in status_norm or "hsp" in status_norm:
-        return f"{safe_title}_Hsp"
-    if "ungekuerzt" in status_norm or "unabridged" in status_norm:
-        return f"{safe_title} (ungekuerzt)"
-    if "gekuerzt" in status_norm or "abridged" in status_norm:
-        return f"{safe_title} (gekuerzt)"
-
-    safe_abridged = sanitize_filename(book.abridged_status)
-    return f"{safe_title} ({safe_abridged})"
+    # Do not encode abridged/unabridged in folder names.
+    return safe_title
 
 
 def merge_folder_contents(src_dir, dst_dir):
@@ -326,8 +290,49 @@ def merge_folder_contents(src_dir, dst_dir):
             shutil.move(src_item, dst_item)
 
 
-def write_metadata_file(folder_path, ean, narrator):
+def cleanup_duplicate_suffix_folders(library_path):
+    """Merge legacy duplicate folders like 'Title_1770793951' into 'Title'."""
+    suffix_pattern = re.compile(r"^(.+)_\d{8,}$")
+    merged_count = 0
+
+    for root, dirs, files in os.walk(library_path):
+        if stop_event.is_set():
+            return
+        if "_DUPLICATES_TO_DELETE" in root:
+            continue
+
+        for dir_name in list(dirs):
+            match = suffix_pattern.match(dir_name)
+            if not match:
+                continue
+            base_name = match.group(1)
+            duplicate_path = os.path.join(root, dir_name)
+            base_path = os.path.join(root, base_name)
+            if not os.path.isdir(base_path):
+                continue
+            try:
+                logger.warning(f"Merging duplicate folder '{dir_name}' into '{base_name}'.")
+                merge_folder_contents(duplicate_path, base_path)
+                shutil.rmtree(duplicate_path, ignore_errors=True)
+                merged_count += 1
+            except Exception as dup_err:
+                logger.error(f"Failed to merge duplicate folder '{dir_name}': {dup_err}")
+
+    if merged_count > 0:
+        logger.info(f"Maintenance: Merged {merged_count} duplicate folder(s).")
+
+
+def write_metadata_file(folder_path, ean, narrator, abridged_status):
     metadata = {"isbn": ean}
+
+    if abridged_status:
+        metadata["abridged_status"] = abridged_status
+        status_norm = normalize_abridged_status(abridged_status)
+        if "ungekuerzt" in status_norm or "unabridged" in status_norm:
+            metadata["abridged"] = False
+        elif "gekuerzt" in status_norm or "abridged" in status_norm:
+            metadata["abridged"] = True
+
     if narrator:
         narrators = []
         for part in narrator.split(";"):
@@ -374,7 +379,6 @@ def process_ean_folder(db: Session, library_path: str, ean: str, source_path: st
     final_path = os.path.join(author_dir, final_title)
     os.makedirs(author_dir, exist_ok=True)
 
-    # Move into final structure first, then optimize in place.
     if os.path.abspath(source_path) != os.path.abspath(final_path):
         if os.path.exists(final_path):
             logger.warning(f"Target '{final_title}' exists. Merging into existing folder.")
@@ -387,7 +391,7 @@ def process_ean_folder(db: Session, library_path: str, ean: str, source_path: st
     convert_folder_to_96k(final_path)
 
     try:
-        write_metadata_file(final_path, ean, book.narrator)
+        write_metadata_file(final_path, ean, book.narrator, book.abridged_status)
     except Exception as meta_err:
         logger.warning(f"Could not write metadata.json: {meta_err}")
 
@@ -404,6 +408,7 @@ def run_once(library_path):
     try:
         # Phase 0: Security & Pre-Cleanup
         cleanup_takedowns(db, library_path)
+        cleanup_duplicate_suffix_folders(library_path)
 
         # Phase 1: Unzip outside library, then move directly into final structure.
         current_items = os.listdir(library_path)
