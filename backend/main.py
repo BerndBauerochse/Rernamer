@@ -1,4 +1,4 @@
-from fastapi import FastAPI, WebSocket, Request, Response
+from fastapi import FastAPI, WebSocket, Request, Response, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional
@@ -187,6 +187,14 @@ class ConfigModel(BaseModel):
     library_path: str
     n8n_webhook_url: Optional[str] = None
 
+
+def resolve_library_path():
+    user_path = config.get("library_path", "")
+    if os.path.exists("/host_mnt") and user_path and not user_path.startswith("/host_mnt"):
+        clean_path = user_path.lstrip("/")
+        return os.path.join("/host_mnt", clean_path)
+    return user_path
+
 @app.get("/api/config")
 def get_config():
     return config
@@ -228,22 +236,18 @@ def start_renamer():
     global is_running
     if is_running:
         return {"status": "Already running"}
-    
-    stop_event.clear()
-    is_running = True
-    
-    # Handle Docker Host Mount Translation
+
     user_path = config["library_path"]
-    if os.path.exists("/host_mnt") and not user_path.startswith("/host_mnt"):
-        clean_path = user_path.lstrip("/")
-        internal_path = os.path.join("/host_mnt", clean_path)
+    internal_path = resolve_library_path()
+    if internal_path != user_path:
         logger.info(f"Using host path mapping: {user_path} -> {internal_path}")
-    else:
-        internal_path = user_path
 
     if not os.path.exists(internal_path):
          logger.error(f"Path not found: {internal_path} (Check if path exists on Server)")
          return {"status": "Error: Path not found"}
+
+    stop_event.clear()
+    is_running = True
 
     # DEBUG: List contents to verify mount
     try:
@@ -293,31 +297,28 @@ def scheduler_loop():
     while scheduler_active:
         if not is_running:
              logger.info("Scheduler: Triggering scheduled cycle...")
-             
-             # Handle Docker Host Mount Translation
-             user_path = config["library_path"]
-             if os.path.exists("/host_mnt") and not user_path.startswith("/host_mnt"):
-                clean_path = user_path.lstrip("/")
-                internal_path = os.path.join("/host_mnt", clean_path)
-             else:
-                internal_path = user_path
+             internal_path = resolve_library_path()
 
-             # Start scan in separate thread to not block scheduler
-             stop_event.clear()
-             is_running = True
-             
-             def scheduled_worker():
-                 global is_running
-                 try:
-                    # SCHEDULER: ONLY RENAME, NO DB UPDATE
-                    run_renamer(internal_path)
-                 except Exception as e:
-                    logger.error(f"Scheduled scan failed: {e}")
-                 finally:
-                    is_running = False
-                    logger.info("Scheduler: Cycle finished. Waiting 60 min.")
-             
-             threading.Thread(target=scheduled_worker, daemon=True).start()
+             if not os.path.exists(internal_path):
+                logger.error(f"Scheduler: Library path not found: {internal_path}")
+             else:
+                stop_event.clear()
+                is_running = True
+
+                def scheduled_worker():
+                    global is_running
+                    try:
+                        logger.info("Scheduler: Refreshing metadata from n8n before scan...")
+                        update_database_from_url()
+                        logger.info("Scheduler: Starting folder scan...")
+                        run_renamer(internal_path)
+                    except Exception as e:
+                        logger.error(f"Scheduled scan failed: {e}")
+                    finally:
+                        is_running = False
+                        logger.info("Scheduler: Cycle finished. Waiting 60 min.")
+
+                threading.Thread(target=scheduled_worker, daemon=True).start()
         
         # Sleep in chunks to allow faster stopping
         for _ in range(60): 
@@ -376,25 +377,33 @@ async def websocket_endpoint(websocket: WebSocket):
     except Exception:
         pass
     finally:
-        pass
+        logger.remove_listener(listener)
 
 # -----------------
 # 3. INVENTORY & STATIC FILE SERVING
 # -----------------
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import HTMLResponse
-from urllib.parse import quote
-import io
+from fastapi.responses import HTMLResponse, FileResponse
 import re
 
-# Mount the library path directly to allow web access to covers
-# If config["library_path"] is "/audiobooks", we mount it to "/files"
-lib_path = config.get("library_path", "/audiobooks")
-if os.path.exists(lib_path):
-    app.mount("/files", StaticFiles(directory=lib_path), name="files")
-    logger.info(f"Serving static files from {lib_path} at /files")
-else:
-    logger.warning(f"Static file path not found: {lib_path}")
+@app.get("/files/{file_path:path}")
+def get_library_file(file_path: str):
+    lib_root = resolve_library_path()
+    if not lib_root or not os.path.exists(lib_root):
+        raise HTTPException(status_code=404, detail="Library path not found")
+
+    abs_root = os.path.abspath(lib_root)
+    abs_target = os.path.abspath(os.path.join(abs_root, file_path))
+
+    try:
+        if os.path.commonpath([abs_root, abs_target]) != abs_root:
+            raise HTTPException(status_code=403, detail="Invalid file path")
+    except ValueError:
+        raise HTTPException(status_code=403, detail="Invalid file path")
+
+    if not os.path.isfile(abs_target):
+        raise HTTPException(status_code=404, detail="File not found")
+
+    return FileResponse(abs_target)
 
 # -----------------
 # 4. AUDIOBOOKSHELF CUSTOM PROVIDER API
@@ -598,11 +607,7 @@ def abs_search(q: str = None, title: str = None, author: str = None, isbn: str =
 
 def get_internal_library_path():
     """Resolves the user configured path to the internal container path"""
-    user_path = config["library_path"]
-    if os.path.exists("/host_mnt") and not user_path.startswith("/host_mnt"):
-        clean_path = user_path.lstrip("/")
-        return os.path.join("/host_mnt", clean_path)
-    return user_path
+    return resolve_library_path()
 
 def check_book_on_disk(book):
     """
@@ -674,7 +679,7 @@ def check_book_on_disk(book):
             # Then prepend /files
             
             full_path = os.path.join(found_dir, cover_file)
-            lib_root = config.get("library_path", "/audiobooks")
+            lib_root = get_internal_library_path()
             
             if full_path.startswith(lib_root):
                 rel_path = full_path.replace(lib_root, "", 1)

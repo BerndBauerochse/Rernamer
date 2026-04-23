@@ -23,6 +23,12 @@ class RenamerLogger:
     def add_listener(self, callback):
         self.listeners.append(callback)
 
+    def remove_listener(self, callback):
+        try:
+            self.listeners.remove(callback)
+        except ValueError:
+            pass
+
     def info(self, message):
         self._emit("INFO", message)
 
