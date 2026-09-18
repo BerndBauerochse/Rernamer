@@ -15,12 +15,33 @@ from datetime import datetime
 # Create Tables
 Base.metadata.create_all(bind=engine)
 
-from renamer_core import run_once as run_renamer, logger, stop_event
+from renamer_core import (
+    run_once as run_renamer,
+    logger,
+    stop_event,
+    find_existing_book_folder,
+    normalize_ean,
+)
 
 # -----------------
 # 1. DATABASE UPDATE LOGIC (Updated for n8n Webhook)
 # -----------------
+db_update_lock = threading.Lock()
+
+
 def update_database_from_url():
+    """Run one metadata refresh and prevent overlapping refreshes."""
+    if not db_update_lock.acquire(blocking=False):
+        logger.warning("DB update already in progress. Skipping overlapping update.")
+        return
+
+    try:
+        _update_database_from_url()
+    finally:
+        db_update_lock.release()
+
+
+def _update_database_from_url():
     # Production URL provided by User configuration
     url = config.get("n8n_webhook_url", "")
     
@@ -54,6 +75,36 @@ def update_database_from_url():
 
         logger.info(f"Received {len(items)} items from n8n.")
 
+        # The source can contain the same EAN more than once.  SessionLocal
+        # deliberately uses autoflush=False, so a query will not see a new
+        # pending row before commit and duplicate rows would otherwise be
+        # inserted in the same transaction.
+        unique_items = {}
+        duplicate_eans = set()
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+
+            raw_ean = item.get("EAN") or item.get("EAN_digital")
+            ean_str = normalize_ean(raw_ean)
+            if not ean_str:
+                continue
+
+            if ean_str in unique_items:
+                duplicate_eans.add(ean_str)
+            # Keep the last source record for an EAN, matching the usual
+            # behavior of a refreshed export while guaranteeing one insert.
+            unique_items[ean_str] = item
+
+        if duplicate_eans:
+            logger.warning(
+                f"n8n returned {len(duplicate_eans)} duplicate EAN(s). "
+                "Using the last record for each EAN."
+            )
+
+        items = list(unique_items.values())
+        logger.info(f"Processing {len(items)} unique EAN(s).")
+
         # Database Update
         db = SessionLocal()
         count_updated = 0
@@ -69,8 +120,7 @@ def update_database_from_url():
                 
                 if not raw_ean: continue
                 
-                ean_str = str(raw_ean).strip()
-                if ean_str.endswith('.0'): ean_str = ean_str[:-2] # Fix Excel number formatting if present
+                ean_str = normalize_ean(raw_ean)
                 if not ean_str: continue
 
                 # Map other fields from JSON
@@ -616,47 +666,7 @@ def check_book_on_disk(book):
     """
     lib_path = get_internal_library_path()
     
-    # 1. Sanitize (Need to duplicate sanitize function here or import)
-    def clean(n): return re.sub(r'[<>:"/\\|?*]', '', str(n)).strip() if n else "Unknown"
-    
-    safe_author = clean(book.author)
-    safe_title = clean(book.title)
-    
-    # Calculate final_title using same logic as renamer_core.py
-    final_title = safe_title
-    if book.abridged_status:
-        status_lower = book.abridged_status.lower().strip()
-        
-        # Check for Hörspiel
-        if "hörspiel" in status_lower or "hoerspiel" in status_lower or "hsp" in status_lower:
-            final_title = f"{safe_title}_Hsp"
-        # Check for Ungekürzt
-        elif "ungekürzt" in status_lower or "ungekuerzt" in status_lower or "unabridged" in status_lower:
-            final_title = f"{safe_title} (ungekuerzt)"
-        # Check for Gekürzt
-        elif "gekürzt" in status_lower or "gekuerzt" in status_lower or "abridged" in status_lower:
-            final_title = f"{safe_title} (gekuerzt)"
-        else:
-            # Unknown status
-            safe_abridged = clean(book.abridged_status)
-            final_title = f"{safe_title} ({safe_abridged})"
-    
-    found_dir = None
-    
-    # Check Author/Title WITH status suffix (new naming scheme)
-    target_dir = os.path.join(lib_path, safe_author, final_title)
-    if os.path.exists(target_dir):
-        found_dir = target_dir
-    # Fallback: Check Author/Title WITHOUT status (old naming scheme without differentiation)
-    elif book.abridged_status:
-        fallback_dir = os.path.join(lib_path, safe_author, safe_title)
-        if os.path.exists(fallback_dir):
-            found_dir = fallback_dir
-    # Check EAN folder (not yet processed)
-    if not found_dir:
-        ean_dir = os.path.join(lib_path, book.ean)
-        if os.path.exists(ean_dir):
-            found_dir = ean_dir
+    found_dir = find_existing_book_folder(lib_path, book)
             
     if found_dir:
         # Look for cover
